@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -9,6 +8,7 @@
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone@7.22.20/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
@@ -22,6 +22,8 @@
         input:disabled, select:disabled, button:disabled { cursor: not-allowed !important; }
         @keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)} }
         .shake { animation: shake 0.3s ease-in-out; }
+        .drag-handle { cursor: grab; }
+        .drag-handle:active { cursor: grabbing; }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-800">
@@ -31,9 +33,38 @@
         const { useState, useEffect, useRef, useMemo } = React;
 
         const UNLOCK_PASSWORD = 'LP2SSC_ID';
-
         const START_OPTIONS = ['09:00', '09:30', '10:00', '10:30', '13:00', '13:30'];
         const END_OPTIONS = ['11:00', '11:30', '12:00', '14:30', '15:00', '15:30'];
+
+        // Helper: detect type from label
+        const detectType = (label) => {
+            if (!label) return 'custom';
+            const l = String(label).toUpperCase().trim();
+            if (l.startsWith('JFT')) return 'JFT';
+            if (l.startsWith('SSW') || l.startsWith('KELAS SSW') || l.includes('SSW')) return 'SSW';
+            return 'custom';
+        };
+
+        // Helper: get next PT number for a type
+        const getNextPtNumber = (meetings, type, excludeId = null) => {
+            let max = 0;
+            meetings.forEach(m => {
+                if (!m || m.id === excludeId) return;
+                if (detectType(m.label) === type) {
+                    const match = String(m.label).match(/PT\s*(\d+)/i);
+                    if (match) max = Math.max(max, parseInt(match[1], 10));
+                    else max = Math.max(max, 1); // plain "JFT" counts as 1
+                }
+            });
+            return max + 1;
+        };
+
+        // Build label like "JFT PT 3" or "SSW PT 1"
+        const buildLabel = (type, num) => {
+            if (type === 'JFT') return `JFT PT ${num}`;
+            if (type === 'SSW') return `SSW PT ${num}`;
+            return '';
+        };
 
         class ErrorBoundary extends React.Component {
             constructor(props) { super(props); this.state = { hasError: false }; }
@@ -84,6 +115,9 @@
         const IconLockClosed = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>;
         const IconClock = () => <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>;
         const IconList = () => <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></svg>;
+        const IconGrip = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="12" r="1"/><circle cx="9" cy="5" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="19" r="1"/></svg>;
+        const IconArrowUp = () => <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m18 15-6-6-6 6"/></svg>;
+        const IconArrowDown = () => <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>;
 
         const App = () => {
             const now = new Date();
@@ -97,11 +131,21 @@
                 return `${ID_MONTHS[idx] || ''} ${y}`;
             };
 
-            const defaultMeeting = () => ({ id: Date.now() + Math.random(), label: 'Pertemuan 1', start: '09:00', end: '11:00', isEdited: false });
+            const defaultMeeting = (existing = []) => {
+                const num = getNextPtNumber(existing, 'JFT');
+                return {
+                    id: Date.now() + Math.random(),
+                    label: buildLabel('JFT', num),
+                    isCustomLabel: false,
+                    start: '09:00',
+                    end: '11:00',
+                    isEdited: false
+                };
+            };
 
             const [isReady, setIsReady] = useState(false);
             const [currentMonth, setCurrentMonth] = useState(THIS_MONTH);
-            const [meetings, setMeetings] = useState([defaultMeeting()]);
+            const [meetings, setMeetings] = useState([defaultMeeting([])]);
             const [rate, setRate] = useState(35000);
             const [monthName, setMonthName] = useState(getDefaultMonthName(THIS_MONTH));
             const [savedMonths, setSavedMonths] = useState({});
@@ -113,9 +157,9 @@
             const [showMonthList, setShowMonthList] = useState(true);
             const [isUnlocked, setIsUnlocked] = useState(() => localStorage.getItem('riza_unlocked') === '1');
             const [lockShake, setLockShake] = useState(false);
-
-            // Mode custom jam per-field: { [`${id}-start`]: true, ... }
             const [customMode, setCustomMode] = useState({});
+            const [dragIndex, setDragIndex] = useState(null);
+            const [dragOverIndex, setDragOverIndex] = useState(null);
 
             const fileInputRef = useRef(null);
             const loadedKeyRef = useRef(null);
@@ -138,7 +182,6 @@
                                 lastUpdated: Date.now()
                             });
                             await db.ref(ROOT).update({ meetings: null, rate: null, monthName: null, lastUpdated: null });
-                            console.log('✅ Data lama dimigrasi ke bulan', key);
                         }
                     } catch (e) { console.error('Migrasi gagal:', e); }
                     setIsReady(true);
@@ -166,11 +209,20 @@
                         const norm = Array.isArray(data.meetings)
                             ? data.meetings
                             : Object.keys(data.meetings).sort().map(k => data.meetings[k]);
-                        lm = norm.map(m => ({ ...m, isEdited: m.isEdited !== undefined ? m.isEdited : true }));
+                        lm = norm.map(m => {
+                            const label = m.label || 'JFT PT 1';
+                            const type = detectType(label);
+                            return {
+                                ...m,
+                                label,
+                                isCustomLabel: m.isCustomLabel !== undefined ? m.isCustomLabel : (type === 'custom'),
+                                isEdited: m.isEdited !== undefined ? m.isEdited : true
+                            };
+                        });
                         lr = typeof data.rate === 'number' ? data.rate : 35000;
                         lmn = data.monthName || getDefaultMonthName(currentMonth);
                     } else {
-                        lm = [defaultMeeting()];
+                        lm = [defaultMeeting([])];
                         lr = 35000;
                         lmn = getDefaultMonthName(currentMonth);
                     }
@@ -215,6 +267,18 @@
             const safeMeetingsArray = Array.isArray(meetings) ? meetings : [];
             const totalHours = safeMeetingsArray.reduce((s, m) => s + (m ? calculateHours(m.start, m.end) : 0), 0);
 
+            const countByKelas = useMemo(() => {
+                const counts = { JFT: 0, SSW: 0, Lainnya: 0 };
+                safeMeetingsArray.forEach(m => {
+                    if (!m) return;
+                    const t = detectType(m.label);
+                    if (t === 'JFT') counts.JFT++;
+                    else if (t === 'SSW') counts.SSW++;
+                    else counts.Lainnya++;
+                });
+                return counts;
+            }, [safeMeetingsArray]);
+
             const computeMonthTotals = (monthData) => {
                 if (!monthData || !monthData.meetings) return { hours: 0, honor: 0 };
                 const arr = Array.isArray(monthData.meetings) ? monthData.meetings : Object.values(monthData.meetings);
@@ -237,12 +301,8 @@
 
             const calculateAutoEndTime = (startTime) => {
                 const map = {
-                    '09:00': '11:00',
-                    '09:30': '11:30',
-                    '10:00': '12:00',
-                    '10:30': '12:00',
-                    '13:00': '15:00',
-                    '13:30': '15:30'
+                    '09:00': '11:00', '09:30': '11:30', '10:00': '12:00',
+                    '10:30': '12:00', '13:00': '15:00', '13:30': '15:30'
                 };
                 if (map[startTime]) return map[startTime];
                 const [h, m] = String(startTime).split(':').map(Number);
@@ -297,13 +357,18 @@
                 const prevKey = prevKeys[prevKeys.length - 1];
                 const prev = savedMonths[prevKey];
                 const arr = Array.isArray(prev.meetings) ? prev.meetings : Object.values(prev.meetings);
-                const copied = arr.map((m, i) => ({
-                    id: Date.now() + i,
-                    label: m.label || `Pertemuan ${i+1}`,
-                    start: m.start || '09:00',
-                    end: m.end || '11:00',
-                    isEdited: false
-                }));
+                const copied = arr.map((m, i) => {
+                    const label = m.label || 'JFT PT 1';
+                    const type = detectType(label);
+                    return {
+                        id: Date.now() + i,
+                        label,
+                        isCustomLabel: type === 'custom',
+                        start: m.start || '09:00',
+                        end: m.end || '11:00',
+                        isEdited: false
+                    };
+                });
                 setMeetings(copied);
                 if (typeof prev.rate === 'number') setRate(prev.rate);
                 alert(`✅ Data disalin dari ${prevKey}. Edit seperlunya, otomatis tersimpan.`);
@@ -311,7 +376,7 @@
 
             const handleReset = () => {
                 if (isLocked) return;
-                setMeetings([defaultMeeting()]);
+                setMeetings([defaultMeeting([])]);
                 setCustomMode({});
                 setShowResetConfirm(false);
             };
@@ -322,6 +387,58 @@
                 try {
                     await db.ref(`${ROOT}/months/${currentMonth}`).remove();
                 } catch (e) { alert('Gagal hapus: ' + e.message); }
+            };
+
+            // === Change type of a meeting (JFT / SSW / Custom) ===
+            const changeType = (id, newType) => {
+                if (isLocked) return;
+                setMeetings(prev => {
+                    if (newType === 'custom') {
+                        return prev.map(x => x.id === id ? { ...x, label: '', isCustomLabel: true, isEdited: true } : x);
+                    }
+                    const num = getNextPtNumber(prev, newType, id);
+                    return prev.map(x => x.id === id ? {
+                        ...x,
+                        label: buildLabel(newType, num),
+                        isCustomLabel: false,
+                        isEdited: true
+                    } : x);
+                });
+            };
+
+            // === REORDER ===
+            const moveMeeting = (fromIndex, toIndex) => {
+                if (isLocked || fromIndex === toIndex || toIndex < 0 || toIndex >= safeMeetingsArray.length) return;
+                const newArr = [...safeMeetingsArray];
+                const [item] = newArr.splice(fromIndex, 1);
+                newArr.splice(toIndex, 0, item);
+                setMeetings(newArr);
+            };
+
+            const handleDragStart = (e, index) => {
+                if (isLocked) return;
+                setDragIndex(index);
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', index);
+            };
+
+            const handleDragOver = (e, index) => {
+                e.preventDefault();
+                if (isLocked || dragIndex === null) return;
+                setDragOverIndex(index);
+            };
+
+            const handleDrop = (e, toIndex) => {
+                e.preventDefault();
+                if (isLocked || dragIndex === null) return;
+                moveMeeting(dragIndex, toIndex);
+                setDragIndex(null);
+                setDragOverIndex(null);
+            };
+
+            const handleDragEnd = () => {
+                setDragIndex(null);
+                setDragOverIndex(null);
             };
 
             const handleFileUpload = (e) => {
@@ -339,32 +456,56 @@
 
                         const loadedMeetings = [];
                         let honorStr = '';
-                        for (let i = 1; i < json.length; i++) {
+                        for (let i = 0; i < json.length; i++) {
                             const row = json[i];
                             if (!row || row.length === 0) continue;
                             const c0 = String(row[0] || '').trim();
-                            if (c0 === '' || c0 === 'TOTAL' || c0 === 'KELAS/PERTEMUAN') continue;
-                            if (c0 === 'HONOR') { honorStr = String(row[3] || ''); continue; }
+                            const c0u = c0.toUpperCase();
+                            if (!c0 || c0u === 'TOTAL' || c0u === 'KELAS/PERTEMUAN' || c0u === 'NO' ||
+                                c0u.includes('REKAPITULASI') || c0u.includes('RIZA') || c0u.includes('BULAN') ||
+                                c0u.includes('RINGKASAN') || c0u.includes('JUMLAH') || c0u.includes('TOTAL HONOR') ||
+                                c0u.includes('TARIF') || c0u.includes('DOKUMEN') || c0u === 'HONOR') {
+                                if (c0u === 'HONOR' || c0u.includes('TOTAL HONOR')) {
+                                    honorStr = String(row[3] || row[1] || '');
+                                }
+                                continue;
+                            }
+
+                            let label = c0;
+                            let startCol = 1, endCol = 2;
+                            // If first col is number (No)
+                            if (!isNaN(parseInt(c0)) && row[1]) {
+                                label = String(row[1] || '').trim();
+                                startCol = 2;
+                                endCol = 3;
+                            }
+                            if (!label) continue;
+
+                            const type = detectType(label);
                             loadedMeetings.push({
                                 id: Date.now() + i,
-                                label: c0,
-                                start: String(row[1] || '09:00'),
-                                end: String(row[2] || '11:00'),
+                                label,
+                                isCustomLabel: type === 'custom',
+                                start: String(row[startCol] || '09:00').trim(),
+                                end: String(row[endCol] || '11:00').trim(),
                                 isEdited: true
                             });
                         }
 
-                        if (loadedMeetings.length === 0) { setLoadStatus('empty'); setTimeout(() => setLoadStatus(false), 2000); return; }
+                        if (loadedMeetings.length === 0) {
+                            setLoadStatus('empty');
+                            setTimeout(() => setLoadStatus(false), 2000);
+                            return;
+                        }
 
                         setMeetings(loadedMeetings);
                         setCustomMode({});
                         setMonthName(getDefaultMonthName(currentMonth));
 
-                        let newRate = rate;
                         const totalH = loadedMeetings.reduce((s, m) => s + calculateHours(m.start, m.end), 0);
                         if (totalH > 0 && honorStr) {
                             const num = parseInt(honorStr.replace(/[^\d]/g, ''), 10);
-                            if (!isNaN(num)) { newRate = Math.round(num / totalH); setRate(newRate); }
+                            if (!isNaN(num)) setRate(Math.round(num / totalH));
                         }
 
                         setLoadStatus('success');
@@ -379,33 +520,220 @@
                 reader.readAsArrayBuffer(file);
             };
 
-            const exportExcel = () => {
-                if (typeof XLSX === 'undefined') { alert("Sistem ekspor belum siap."); return; }
-                const headers = ['KELAS/PERTEMUAN', 'JAM MULAI', 'JAM SELESAI', 'JAM NGAJAR', 'MENIT'];
-                const rows = safeMeetingsArray.map(m => {
-                    const d = calculateHours(m.start, m.end);
-                    return [m.label, m.start, m.end, Number(d.toFixed(1)), Math.round(d * 60)];
-                });
-                const totalRowIdx = safeMeetingsArray.length + 3;
-                const wsData = [
-                    headers, ...rows,
-                    ['', '', '', '', ''],
-                    ['TOTAL', '', '', { t: 'n', f: `E${totalRowIdx}/60` }, Math.round(totalHours * 60)],
-                    ['HONOR', '', '', `Rp ${(totalHours * rate).toLocaleString('id-ID')}`, '']
+            // === IMPROVED EXPORT ===
+            const exportExcel = async () => {
+                if (typeof ExcelJS === 'undefined') { alert("Sistem ekspor belum siap. Refresh halaman."); return; }
+
+                const totalJam = totalHours;
+                const totalMenit = Math.round(totalHours * 60);
+                const totalHonor = Math.round(totalHours * rate);
+                const sswCount = countByKelas.SSW;
+                const jftCount = countByKelas.JFT;
+                const lainCount = countByKelas.Lainnya;
+                const totalPertemuan = safeMeetingsArray.length;
+
+                const workbook = new ExcelJS.Workbook();
+                const ws = workbook.addWorksheet("Rekap Honor");
+
+                // Styles (sama seperti Dashboard Absensi)
+                const titleFont = { name: "Arial", bold: true, size: 16, color: { argb: "FF1F4E79" } };
+                const subtitleFont = { name: "Arial", bold: true, size: 13, color: { argb: "FF2E86AB" } };
+                const monthFont = { name: "Arial", bold: true, size: 11, color: { argb: "FF1F4E79" } };
+                const headerFont = { name: "Arial", bold: true, size: 10, color: { argb: "FFFFFFFF" } };
+                const normalFont = { name: "Arial", size: 10 };
+                const boldFont = { name: "Arial", bold: true, size: 10 };
+                const honorFont = { name: "Arial", bold: true, size: 13, color: { argb: "FF1B5E20" } };
+                const thinBorder = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+                const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F4E79" } };
+                const sswFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8F5E9" } };
+                const jftFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE3F2FD" } };
+                const lainFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF8E1" } };
+                const totalFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD6EAF8" } };
+                const summaryFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF3E0" } };
+                const honorFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC8E6C9" } };
+
+                // Column widths
+                ws.columns = [
+                    { width: 6 },
+                    { width: 22 },
+                    { width: 12 },
+                    { width: 12 },
+                    { width: 12 },
+                    { width: 10 }
                 ];
-                const ws = XLSX.utils.aoa_to_sheet(wsData);
-                const wb = XLSX.utils.book_new();
-                XLSX.utils.book_append_sheet(wb, ws, "Rekap Jam");
-                XLSX.writeFile(wb, `HONOR RIZA SENSEI - BULAN ${monthName}.xlsx`);
+
+                // ===== TITLE =====
+                ws.mergeCells(1, 1, 1, 6);
+                const t1 = ws.getCell(1, 1);
+                t1.value = "REKAPITULASI HONOR MENGAJAR";
+                t1.font = titleFont;
+                t1.alignment = { horizontal: "center", vertical: "middle" };
+                ws.getRow(1).height = 28;
+
+                ws.mergeCells(2, 1, 2, 6);
+                const t2 = ws.getCell(2, 1);
+                t2.value = "RIZA SENSEI";
+                t2.font = subtitleFont;
+                t2.alignment = { horizontal: "center", vertical: "middle" };
+                ws.getRow(2).height = 22;
+
+                ws.mergeCells(3, 1, 3, 6);
+                const t3 = ws.getCell(3, 1);
+                t3.value = `Bulan ${monthName}`;
+                t3.font = monthFont;
+                t3.alignment = { horizontal: "center", vertical: "middle" };
+                ws.getRow(3).height = 20;
+
+                // ===== HEADER =====
+                const headers = ["No", "Kelas / Pertemuan", "Jam Mulai", "Jam Selesai", "Jam Ngajar", "Menit"];
+                headers.forEach((h, i) => {
+                    const cell = ws.getCell(5, i + 1);
+                    cell.value = h;
+                    cell.font = headerFont;
+                    cell.fill = headerFill;
+                    cell.border = thinBorder;
+                    cell.alignment = { horizontal: "center", vertical: "middle" };
+                });
+                ws.getRow(5).height = 22;
+
+                // ===== DATA ROWS =====
+                safeMeetingsArray.forEach((m, idx) => {
+                    const row = 6 + idx;
+                    const d = calculateHours(m.start, m.end);
+                    const type = detectType(m.label);
+                    const fill = type === "SSW" ? sswFill : (type === "JFT" ? jftFill : lainFill);
+
+                    const vals = [idx + 1, m.label, m.start, m.end, Number(d.toFixed(1)), Math.round(d * 60)];
+                    vals.forEach((v, i) => {
+                        const cell = ws.getCell(row, i + 1);
+                        cell.value = v;
+                        cell.font = normalFont;
+                        cell.border = thinBorder;
+                        cell.alignment = { horizontal: "center", vertical: "middle" };
+                        cell.fill = fill;
+                    });
+                });
+
+                // ===== TOTAL =====
+                const totalRow = 6 + safeMeetingsArray.length + 1;
+                ws.mergeCells(totalRow, 1, totalRow, 4);
+                const totLabel = ws.getCell(totalRow, 1);
+                totLabel.value = "TOTAL";
+                totLabel.font = boldFont;
+                totLabel.fill = totalFill;
+                totLabel.border = thinBorder;
+                totLabel.alignment = { horizontal: "center", vertical: "middle" };
+                [2, 3, 4].forEach(c => {
+                    const cell = ws.getCell(totalRow, c);
+                    cell.fill = totalFill;
+                    cell.border = thinBorder;
+                });
+                const totJam = ws.getCell(totalRow, 5);
+                totJam.value = Number(totalJam.toFixed(1));
+                totJam.font = boldFont;
+                totJam.fill = totalFill;
+                totJam.border = thinBorder;
+                totJam.alignment = { horizontal: "center", vertical: "middle" };
+                const totMenit = ws.getCell(totalRow, 6);
+                totMenit.value = totalMenit;
+                totMenit.font = boldFont;
+                totMenit.fill = totalFill;
+                totMenit.border = thinBorder;
+                totMenit.alignment = { horizontal: "center", vertical: "middle" };
+
+                // ===== RINGKASAN =====
+                let r = totalRow + 2;
+                ws.mergeCells(r, 1, r, 6);
+                const ring = ws.getCell(r, 1);
+                ring.value = "RINGKASAN";
+                ring.font = { name: "Arial", bold: true, size: 11, color: { argb: "FF1F4E79" } };
+                ring.alignment = { horizontal: "left", vertical: "middle" };
+
+                const summaryItems = [
+                    ["Jumlah Pertemuan Kelas SSW", sswCount],
+                    ["Jumlah Pertemuan JFT", jftCount],
+                ];
+                if (lainCount > 0) summaryItems.push(["Jumlah Pertemuan Lainnya", lainCount]);
+                summaryItems.push(
+                    ["Total Pertemuan", totalPertemuan],
+                    ["Total Jam Mengajar", `${totalJam.toFixed(1)} Jam`],
+                    ["Total Menit", `${totalMenit.toLocaleString("id-ID")} Menit`]
+                );
+
+                summaryItems.forEach((item, i) => {
+                    const row = r + 1 + i;
+                    ws.mergeCells(row, 1, row, 3);
+                    const lab = ws.getCell(row, 1);
+                    lab.value = item[0];
+                    lab.font = normalFont;
+                    lab.fill = summaryFill;
+                    lab.border = thinBorder;
+                    lab.alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+                    [2, 3].forEach(c => { ws.getCell(row, c).fill = summaryFill; ws.getCell(row, c).border = thinBorder; });
+
+                    ws.mergeCells(row, 4, row, 6);
+                    const val = ws.getCell(row, 4);
+                    val.value = item[1];
+                    val.font = boldFont;
+                    val.fill = summaryFill;
+                    val.border = thinBorder;
+                    val.alignment = { horizontal: "center", vertical: "middle" };
+                    [5, 6].forEach(c => { ws.getCell(row, c).fill = summaryFill; ws.getCell(row, c).border = thinBorder; });
+                });
+
+                // ===== TOTAL HONOR =====
+                const honorRow = r + 1 + summaryItems.length + 1;
+                ws.mergeCells(honorRow, 1, honorRow, 3);
+                const hLab = ws.getCell(honorRow, 1);
+                hLab.value = "TOTAL HONOR";
+                hLab.font = { name: "Arial", bold: true, size: 12, color: { argb: "FF1B5E20" } };
+                hLab.fill = honorFill;
+                hLab.border = thinBorder;
+                hLab.alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+                [2, 3].forEach(c => { ws.getCell(honorRow, c).fill = honorFill; ws.getCell(honorRow, c).border = thinBorder; });
+
+                ws.mergeCells(honorRow, 4, honorRow, 6);
+                const hVal = ws.getCell(honorRow, 4);
+                hVal.value = `Rp ${totalHonor.toLocaleString("id-ID")}`;
+                hVal.font = honorFont;
+                hVal.fill = honorFill;
+                hVal.border = thinBorder;
+                hVal.alignment = { horizontal: "center", vertical: "middle" };
+                [5, 6].forEach(c => { ws.getCell(honorRow, c).fill = honorFill; ws.getCell(honorRow, c).border = thinBorder; });
+
+                // Tarif note
+                const tarifRow = honorRow + 1;
+                ws.mergeCells(tarifRow, 1, tarifRow, 6);
+                const tarif = ws.getCell(tarifRow, 1);
+                tarif.value = `Tarif: Rp ${rate.toLocaleString("id-ID")} / jam  |  ${totalJam.toFixed(1)} jam × Rp ${rate.toLocaleString("id-ID")} = Rp ${totalHonor.toLocaleString("id-ID")}`;
+                tarif.font = { name: "Arial", size: 9, italic: true, color: { argb: "FF555555" } };
+                tarif.alignment = { horizontal: "center", vertical: "middle" };
+
+                // Footer
+                const footRow = tarifRow + 2;
+                ws.mergeCells(footRow, 1, footRow, 6);
+                const foot = ws.getCell(footRow, 1);
+                foot.value = `Dokumen ini dibuat sebagai rekapitulasi honor mengajar Riza Sensei untuk periode ${monthName}.`;
+                foot.font = { name: "Arial", size: 8, italic: true, color: { argb: "FF888888" } };
+                foot.alignment = { horizontal: "center" };
+
+                // Download
+                const buffer = await workbook.xlsx.writeBuffer();
+                const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `HONOR RIZA SENSEI - BULAN ${monthName}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
             };
 
             const getSafeStartOptions = (v) => [...new Set([...START_OPTIONS, v])].filter(Boolean).sort();
             const getSafeEndOptions = (v) => [...new Set([...END_OPTIONS, v])].filter(Boolean).sort();
 
-            // --- TOGGLE CUSTOM MODE ---
-            const toggleCustom = (key) => {
-                setCustomMode(prev => ({ ...prev, [key]: !prev[key] }));
-            };
+            const toggleCustom = (key) => setCustomMode(prev => ({ ...prev, [key]: !prev[key] }));
             const isCustom = (key) => !!customMode[key];
 
             const renderCloudStatus = () => {
@@ -424,69 +752,46 @@
                     {isLocked && (
                         <div className="mb-4 bg-gradient-to-r from-amber-500 to-orange-500 rounded-2xl p-4 flex items-center justify-between shadow-lg shadow-amber-200/60">
                             <div className="flex items-center gap-3 text-white">
-                                <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
-                                    <IconLockClosed />
-                                </div>
+                                <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center"><IconLockClosed /></div>
                                 <div>
                                     <p className="font-black text-sm">🔒 Bulan Lampau Terkunci</p>
                                     <p className="text-[10px] text-amber-100 font-medium">Gaji bulan ini aman dari editan</p>
                                 </div>
                             </div>
-                            <button onClick={toggleLock} className={`text-[10px] font-black bg-white text-amber-700 px-3 py-2 rounded-lg hover:bg-amber-50 transition-colors ${lockShake ? 'shake' : ''}`}>
-                                BUKA KUNCI
-                            </button>
+                            <button onClick={toggleLock} className={`text-[10px] font-black bg-white text-amber-700 px-3 py-2 rounded-lg hover:bg-amber-50 ${lockShake ? 'shake' : ''}`}>BUKA KUNCI</button>
                         </div>
                     )}
 
                     {isPastMonth && isUnlocked && (
                         <div className="mb-4 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-2xl p-4 flex items-center justify-between shadow-lg shadow-emerald-200/60">
                             <div className="flex items-center gap-3 text-white">
-                                <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
-                                    <IconLockOpen />
-                                </div>
+                                <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center"><IconLockOpen /></div>
                                 <div>
                                     <p className="font-black text-sm">🔓 Mode Edit Terbuka</p>
                                     <p className="text-[10px] text-emerald-100 font-medium">Semua bulan lampau bisa diedit</p>
                                 </div>
                             </div>
-                            <button onClick={toggleLock} className="text-[10px] font-black bg-white text-emerald-700 px-3 py-2 rounded-lg hover:bg-emerald-50 transition-colors">
-                                KUNCI LAGI
-                            </button>
+                            <button onClick={toggleLock} className="text-[10px] font-black bg-white text-emerald-700 px-3 py-2 rounded-lg hover:bg-emerald-50">KUNCI LAGI</button>
                         </div>
                     )}
 
                     <div className="bg-white rounded-[2rem] shadow-xl shadow-slate-200/60 overflow-hidden border border-white">
                         <div className={`p-6 md:p-8 text-white transition-colors ${isLocked ? 'bg-gradient-to-br from-slate-700 to-slate-900' : isPastMonth ? 'bg-emerald-600' : 'bg-indigo-600'}`}>
                             <div className="flex items-center gap-2 mb-4">
-                                <button onClick={() => shiftMonth(-1)} className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/10 hover:bg-white/20 transition-colors">
-                                    <IconChevronLeft />
-                                </button>
-                                <input
-                                    type="month"
-                                    value={currentMonth}
-                                    onChange={e => e.target.value && handleMonthChange(e.target.value)}
-                                    className="flex-1 bg-white/10 text-white font-black rounded-xl px-3 py-2 text-center text-sm cursor-pointer hover:bg-white/15 transition-colors"
-                                />
-                                <button onClick={() => shiftMonth(1)} className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/10 hover:bg-white/20 transition-colors">
-                                    <IconChevronRight />
-                                </button>
+                                <button onClick={() => shiftMonth(-1)} className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/10 hover:bg-white/20"><IconChevronLeft /></button>
+                                <input type="month" value={currentMonth} onChange={e => e.target.value && handleMonthChange(e.target.value)}
+                                    className="flex-1 bg-white/10 text-white font-black rounded-xl px-3 py-2 text-center text-sm cursor-pointer hover:bg-white/15" />
+                                <button onClick={() => shiftMonth(1)} className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/10 hover:bg-white/20"><IconChevronRight /></button>
                             </div>
 
                             {currentMonth !== THIS_MONTH && (
-                                <button onClick={() => handleMonthChange(THIS_MONTH)} className="text-[10px] font-bold bg-white/15 hover:bg-white/25 px-3 py-1 rounded-full mb-3 transition-colors">
-                                    📅 Ke Bulan Ini
-                                </button>
+                                <button onClick={() => handleMonthChange(THIS_MONTH)} className="text-[10px] font-bold bg-white/15 hover:bg-white/25 px-3 py-1 rounded-full mb-3">📅 Ke Bulan Ini</button>
                             )}
 
                             <div className="flex items-center text-xl md:text-2xl font-black mb-1">
                                 <span className="mr-2 whitespace-nowrap">{isLocked ? '🔒' : isPastMonth ? '🔓' : '📖'}</span>
-                                <input
-                                    className={`w-full min-w-0 bg-transparent border-none focus:ring-0 p-0 uppercase placeholder-indigo-300 ${isLocked ? 'cursor-not-allowed text-slate-200' : ''}`}
-                                    value={monthName}
-                                    onChange={e => !isLocked && setMonthName(e.target.value.toUpperCase())}
-                                    disabled={isLocked}
-                                    placeholder="FEBRUARI 2026"
-                                />
+                                <input className={`w-full min-w-0 bg-transparent border-none focus:ring-0 p-0 uppercase ${isLocked ? 'cursor-not-allowed text-slate-200' : ''}`}
+                                    value={monthName} onChange={e => !isLocked && setMonthName(e.target.value.toUpperCase())} disabled={isLocked} placeholder="FEBRUARI 2026" />
                             </div>
                             <div className="flex items-center justify-between gap-2">
                                 <p className={`text-[10px] md:text-xs font-bold uppercase tracking-widest ${isLocked ? 'text-slate-400' : 'text-white/70'}`}>
@@ -495,11 +800,8 @@
                                 <div className="flex items-center gap-1.5">
                                     {renderCloudStatus()}
                                     {isPastMonth && (
-                                        <button
-                                            onClick={toggleLock}
-                                            className={`text-[9px] font-bold px-2 py-0.5 rounded-full transition-colors flex items-center gap-1 ${isLocked ? 'bg-emerald-400 text-emerald-900 hover:bg-emerald-300' : 'bg-white/20 text-white hover:bg-white/30'} ${lockShake ? 'shake' : ''}`}
-                                            title={isLocked ? 'Buka kunci' : 'Kunci kembali'}
-                                        >
+                                        <button onClick={toggleLock}
+                                            className={`text-[9px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${isLocked ? 'bg-emerald-400 text-emerald-900' : 'bg-white/20 text-white'} ${lockShake ? 'shake' : ''}`}>
                                             {isLocked ? <IconLockOpen /> : <IconLockClosed />}
                                             {isLocked ? 'BUKA' : 'KUNCI'}
                                         </button>
@@ -509,7 +811,7 @@
                         </div>
 
                         <div className="p-6 md:p-8">
-                            <div className="grid grid-cols-2 gap-4 mb-8">
+                            <div className="grid grid-cols-2 gap-4 mb-6">
                                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                                     <span className="block text-[10px] font-black text-slate-400 uppercase mb-1">Total Jam</span>
                                     <span className="text-2xl font-black text-indigo-600">{totalHours.toFixed(1)}</span>
@@ -520,11 +822,20 @@
                                 </div>
                             </div>
 
+                            <div className="flex gap-2 mb-6 flex-wrap">
+                                <span className="text-[10px] font-bold bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full">JFT: {countByKelas.JFT}</span>
+                                <span className="text-[10px] font-bold bg-green-100 text-green-700 px-2.5 py-1 rounded-full">SSW: {countByKelas.SSW}</span>
+                                {countByKelas.Lainnya > 0 && (
+                                    <span className="text-[10px] font-bold bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full">Lainnya: {countByKelas.Lainnya}</span>
+                                )}
+                                <span className="text-[10px] font-bold bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full">Total: {safeMeetingsArray.length}</span>
+                            </div>
+
                             <div className="flex items-center justify-between mb-4 px-2">
                                 <h3 className="font-black text-slate-400 text-xs uppercase tracking-widest">Daftar Pertemuan</h3>
                                 {!isLocked && (
                                     <div className="flex items-center gap-3">
-                                        <button onClick={copyFromPreviousMonth} className="text-slate-400 hover:text-indigo-500 transition-colors flex items-center gap-1 text-[10px] font-bold" title="Copy dari bulan sebelumnya">
+                                        <button onClick={copyFromPreviousMonth} className="text-slate-400 hover:text-indigo-500 flex items-center gap-1 text-[10px] font-bold">
                                             <IconCopy /> Copy
                                         </button>
                                         {showResetConfirm ? (
@@ -533,55 +844,111 @@
                                                 <button onClick={() => setShowResetConfirm(false)} className="text-[10px] font-bold bg-slate-200 px-2 py-1 rounded-lg text-slate-700">BATAL</button>
                                             </div>
                                         ) : (
-                                            <button onClick={() => setShowResetConfirm(true)} className="text-slate-300 hover:text-rose-500 transition-colors" title="Kosongkan daftar bulan ini"><IconRefresh /></button>
+                                            <button onClick={() => setShowResetConfirm(true)} className="text-slate-300 hover:text-rose-500"><IconRefresh /></button>
                                         )}
                                     </div>
                                 )}
-                                {isLocked && (
-                                    <span className="text-[10px] font-bold text-amber-500 flex items-center gap-1">
-                                        <IconLockClosed /> Terkunci
-                                    </span>
-                                )}
+                                {isLocked && <span className="text-[10px] font-bold text-amber-500 flex items-center gap-1"><IconLockClosed /> Terkunci</span>}
                             </div>
 
                             <div className="space-y-3">
-                                {safeMeetingsArray.map((m) => {
+                                {safeMeetingsArray.map((m, index) => {
                                     if (!m) return null;
                                     const dur = calculateHours(m.start, m.end);
                                     const isUnedited = m.isEdited === false && !isLocked;
-                                    const rowClasses = isLocked
-                                        ? "p-4 rounded-2xl border border-slate-200 bg-slate-50 shadow-sm"
-                                        : isUnedited
-                                            ? "p-4 rounded-2xl border-2 border-rose-300 bg-rose-50 shadow-md transition-all"
-                                            : "p-4 rounded-2xl border border-slate-200 bg-white shadow-sm transition-all hover:border-indigo-100";
+                                    const isDragging = dragIndex === index;
+                                    const isDragOver = dragOverIndex === index && dragIndex !== index;
+                                    const currentType = detectType(m.label);
+
+                                    let rowClasses = "p-4 rounded-2xl border shadow-sm transition-all ";
+                                    if (isLocked) rowClasses += "border-slate-200 bg-slate-50";
+                                    else if (isDragging) rowClasses += "border-indigo-300 bg-indigo-50 opacity-60";
+                                    else if (isDragOver) rowClasses += "border-indigo-400 bg-indigo-50 border-t-4";
+                                    else if (isUnedited) rowClasses += "border-2 border-rose-300 bg-rose-50 shadow-md";
+                                    else rowClasses += "border-slate-200 bg-white hover:border-indigo-100";
 
                                     const startKey = `${m.id}-start`;
                                     const endKey = `${m.id}-end`;
                                     const startCustom = isCustom(startKey);
                                     const endCustom = isCustom(endKey);
 
-                                    const startInputClasses = `flex-1 min-w-0 border-none rounded-xl px-3 py-2 text-xs font-bold focus:ring-2 focus:ring-indigo-500 ${isLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : isUnedited ? 'bg-white text-rose-800' : 'bg-slate-50 text-slate-700'}`;
-                                    const endInputClasses = `flex-1 min-w-0 border-none rounded-xl px-3 py-2 text-xs font-bold focus:ring-2 focus:ring-indigo-500 ${isLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : isUnedited ? 'bg-white text-rose-800' : 'bg-slate-50 text-slate-700'} ${dur <= 0 && !isLocked ? '!text-rose-600' : ''}`;
-
-                                    const toggleBtnClasses = `flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-lg transition-colors ${isLocked ? 'bg-slate-100 text-slate-300 cursor-not-allowed' : 'bg-slate-100 text-slate-400 hover:bg-indigo-100 hover:text-indigo-600'}`;
+                                    const inputBase = `flex-1 min-w-0 border-none rounded-xl px-3 py-2 text-xs font-bold focus:ring-2 focus:ring-indigo-500 ${isLocked ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : isUnedited ? 'bg-white text-rose-800' : 'bg-slate-50 text-slate-700'}`;
+                                    const toggleBtn = `flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-lg ${isLocked ? 'bg-slate-100 text-slate-300' : 'bg-slate-100 text-slate-400 hover:bg-indigo-100 hover:text-indigo-600'}`;
 
                                     return (
-                                        <div key={m.id} className={rowClasses}>
-                                            <div className="flex justify-between items-start mb-3">
-                                                <input
-                                                    className={`font-bold bg-transparent border-none focus:ring-0 p-0 text-sm w-3/4 ${isLocked ? 'text-slate-600 cursor-not-allowed' : isUnedited ? 'text-rose-800' : 'text-slate-700'}`}
-                                                    value={m.label}
-                                                    disabled={isLocked}
-                                                    onChange={e => !isLocked && setMeetings(safeMeetingsArray.map(x => x.id === m.id ? { ...x, label: e.target.value, isEdited: true } : x))}
-                                                />
+                                        <div key={m.id} className={rowClasses}
+                                            draggable={!isLocked}
+                                            onDragStart={(e) => handleDragStart(e, index)}
+                                            onDragOver={(e) => handleDragOver(e, index)}
+                                            onDrop={(e) => handleDrop(e, index)}
+                                            onDragEnd={handleDragEnd}
+                                        >
+                                            <div className="flex justify-between items-start mb-3 gap-2">
+                                                <div className="flex items-center gap-2 flex-1 min-w-0">
+                                                    {!isLocked && (
+                                                        <div className="flex flex-col items-center gap-0.5 flex-shrink-0">
+                                                            <button onClick={() => moveMeeting(index, index - 1)} disabled={index === 0}
+                                                                className="w-6 h-5 flex items-center justify-center rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-30">
+                                                                <IconArrowUp />
+                                                            </button>
+                                                            <div className="drag-handle text-slate-300 hover:text-indigo-500"><IconGrip /></div>
+                                                            <button onClick={() => moveMeeting(index, index + 1)} disabled={index === safeMeetingsArray.length - 1}
+                                                                className="w-6 h-5 flex items-center justify-center rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-30">
+                                                                <IconArrowDown />
+                                                            </button>
+                                                        </div>
+                                                    )}
+
+                                                    <div className="flex-1 min-w-0">
+                                                        {m.isCustomLabel ? (
+                                                            <div className="flex items-center gap-1">
+                                                                <input
+                                                                    className={`font-bold bg-transparent border-b border-dashed border-slate-300 focus:ring-0 p-0 text-sm w-full ${isLocked ? 'text-slate-600' : isUnedited ? 'text-rose-800' : 'text-slate-700'}`}
+                                                                    value={m.label}
+                                                                    disabled={isLocked}
+                                                                    placeholder="Nama kelas custom..."
+                                                                    onChange={e => !isLocked && setMeetings(safeMeetingsArray.map(x => x.id === m.id ? { ...x, label: e.target.value, isEdited: true } : x))}
+                                                                />
+                                                                {!isLocked && (
+                                                                    <button onClick={() => changeType(m.id, 'JFT')}
+                                                                        className="text-[9px] font-bold text-indigo-500 bg-indigo-50 px-1.5 py-0.5 rounded flex-shrink-0">
+                                                                        Pilih
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        ) : (
+                                                            <select
+                                                                className={`font-bold bg-transparent border-none focus:ring-0 p-0 text-sm cursor-pointer w-full ${isLocked ? 'text-slate-600' : isUnedited ? 'text-rose-800' : 'text-slate-700'}`}
+                                                                value={currentType === 'custom' ? 'JFT' : currentType}
+                                                                disabled={isLocked}
+                                                                onChange={e => {
+                                                                    const val = e.target.value;
+                                                                    if (val === 'custom') changeType(m.id, 'custom');
+                                                                    else changeType(m.id, val);
+                                                                }}
+                                                            >
+                                                                <option value="JFT">JFT (auto PT)</option>
+                                                                <option value="SSW">SSW (auto PT)</option>
+                                                                <option value="custom">✏️ Custom...</option>
+                                                            </select>
+                                                        )}
+                                                        {/* Show current label below select for clarity */}
+                                                        {!m.isCustomLabel && (
+                                                            <div className={`text-[11px] font-bold mt-0.5 ${currentType === 'JFT' ? 'text-blue-600' : currentType === 'SSW' ? 'text-green-600' : 'text-slate-500'}`}>
+                                                                {m.label}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+
                                                 {!isLocked && (
                                                     deleteConfirmId === m.id ? (
-                                                        <div className="flex gap-2">
+                                                        <div className="flex gap-2 flex-shrink-0">
                                                             <button onClick={() => setMeetings(safeMeetingsArray.filter(x => x.id !== m.id))} className="text-[10px] font-bold bg-rose-600 text-white px-2 py-1 rounded-lg">Ya, Hapus</button>
-                                                            <button onClick={() => setDeleteConfirmId(null)} className="text-[10px] font-bold bg-white text-slate-700 px-2 py-1 rounded-lg border border-slate-300">Batal</button>
+                                                            <button onClick={() => setDeleteConfirmId(null)} className="text-[10px] font-bold bg-white text-slate-700 px-2 py-1 rounded-lg border">Batal</button>
                                                         </div>
                                                     ) : (
-                                                        <button onClick={() => setDeleteConfirmId(m.id)} className={`${isUnedited ? 'text-rose-400 hover:text-rose-600' : 'text-slate-300 hover:text-rose-500'} transition-colors`}>
+                                                        <button onClick={() => setDeleteConfirmId(m.id)} className={`${isUnedited ? 'text-rose-400' : 'text-slate-300 hover:text-rose-500'} flex-shrink-0`}>
                                                             <IconTrash />
                                                         </button>
                                                     )
@@ -590,69 +957,40 @@
                                             </div>
 
                                             <div className="flex items-center gap-2">
-                                                {/* START FIELD */}
                                                 <div className="flex items-center gap-1 flex-1 min-w-0">
                                                     {startCustom ? (
-                                                        <input
-                                                            type="time"
-                                                            value={m.start}
-                                                            disabled={isLocked}
+                                                        <input type="time" value={m.start} disabled={isLocked}
                                                             onChange={e => !isLocked && setMeetings(safeMeetingsArray.map(x => x.id === m.id ? { ...x, start: e.target.value, isEdited: true } : x))}
-                                                            className={startInputClasses}
-                                                        />
+                                                            className={inputBase} />
                                                     ) : (
-                                                        <select
-                                                            className={startInputClasses}
-                                                            value={m.start}
-                                                            disabled={isLocked}
+                                                        <select className={inputBase} value={m.start} disabled={isLocked}
                                                             onChange={e => {
                                                                 if (isLocked) return;
                                                                 const newStart = e.target.value;
-                                                                const autoEnd = calculateAutoEndTime(newStart);
-                                                                setMeetings(safeMeetingsArray.map(x => x.id === m.id ? { ...x, start: newStart, end: autoEnd, isEdited: true } : x));
-                                                            }}
-                                                        >
+                                                                setMeetings(safeMeetingsArray.map(x => x.id === m.id ? { ...x, start: newStart, end: calculateAutoEndTime(newStart), isEdited: true } : x));
+                                                            }}>
                                                             {getSafeStartOptions(m.start).map(t => <option key={t} value={t}>{t}</option>)}
                                                         </select>
                                                     )}
-                                                    <button
-                                                        onClick={() => !isLocked && toggleCustom(startKey)}
-                                                        disabled={isLocked}
-                                                        className={toggleBtnClasses}
-                                                        title={startCustom ? 'Balik ke daftar preset' : 'Pilih jam custom (bebas)'}
-                                                    >
+                                                    <button onClick={() => !isLocked && toggleCustom(startKey)} disabled={isLocked} className={toggleBtn}>
                                                         {startCustom ? <IconList /> : <IconClock />}
                                                     </button>
                                                 </div>
 
                                                 <span className={`${isLocked ? 'text-slate-400' : isUnedited ? 'text-rose-400' : 'text-slate-300'} font-bold flex-shrink-0`}>-</span>
 
-                                                {/* END FIELD */}
                                                 <div className="flex items-center gap-1 flex-1 min-w-0">
                                                     {endCustom ? (
-                                                        <input
-                                                            type="time"
-                                                            value={m.end}
-                                                            disabled={isLocked}
+                                                        <input type="time" value={m.end} disabled={isLocked}
                                                             onChange={e => !isLocked && setMeetings(safeMeetingsArray.map(x => x.id === m.id ? { ...x, end: e.target.value, isEdited: true } : x))}
-                                                            className={endInputClasses}
-                                                        />
+                                                            className={`${inputBase} ${dur <= 0 && !isLocked ? '!text-rose-600' : ''}`} />
                                                     ) : (
-                                                        <select
-                                                            className={endInputClasses}
-                                                            value={m.end}
-                                                            disabled={isLocked}
-                                                            onChange={e => !isLocked && setMeetings(safeMeetingsArray.map(x => x.id === m.id ? { ...x, end: e.target.value, isEdited: true } : x))}
-                                                        >
+                                                        <select className={`${inputBase} ${dur <= 0 && !isLocked ? '!text-rose-600' : ''}`} value={m.end} disabled={isLocked}
+                                                            onChange={e => !isLocked && setMeetings(safeMeetingsArray.map(x => x.id === m.id ? { ...x, end: e.target.value, isEdited: true } : x))}>
                                                             {getSafeEndOptions(m.end).map(t => <option key={t} value={t}>{t}</option>)}
                                                         </select>
                                                     )}
-                                                    <button
-                                                        onClick={() => !isLocked && toggleCustom(endKey)}
-                                                        disabled={isLocked}
-                                                        className={toggleBtnClasses}
-                                                        title={endCustom ? 'Balik ke daftar preset' : 'Pilih jam custom (bebas)'}
-                                                    >
+                                                    <button onClick={() => !isLocked && toggleCustom(endKey)} disabled={isLocked} className={toggleBtn}>
                                                         {endCustom ? <IconList /> : <IconClock />}
                                                     </button>
                                                 </div>
@@ -668,8 +1006,8 @@
 
                                 {!isLocked && (
                                     <button
-                                        onClick={() => setMeetings([...safeMeetingsArray, { id: Date.now(), label: `Pertemuan ${safeMeetingsArray.length + 1}`, start: '09:00', end: '11:00', isEdited: false }])}
-                                        className="w-full py-4 border-2 border-dashed border-slate-200 rounded-2xl flex items-center justify-center gap-2 text-slate-400 font-bold hover:bg-slate-50 hover:border-indigo-200 hover:text-indigo-400 transition-all"
+                                        onClick={() => setMeetings(prev => [...prev, defaultMeeting(prev)])}
+                                        className="w-full py-4 border-2 border-dashed border-slate-200 rounded-2xl flex items-center justify-center gap-2 text-slate-400 font-bold hover:bg-slate-50 hover:border-indigo-200 hover:text-indigo-400"
                                     >
                                         <IconPlus /> Tambah Baris
                                     </button>
@@ -681,26 +1019,17 @@
 
                         <div className="p-6 bg-slate-50 border-t border-slate-100 flex flex-col gap-3">
                             <div className="flex gap-3">
-                                <button
-                                    onClick={() => !isLocked && fileInputRef.current.click()}
-                                    disabled={isLocked}
-                                    className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-2xl font-bold transition-all ${isLocked ? 'bg-slate-100 text-slate-400 border border-slate-200' : loadStatus === 'success' ? 'bg-indigo-500 text-white' : loadStatus === 'empty' ? 'bg-rose-500 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'}`}
-                                >
+                                <button onClick={() => !isLocked && fileInputRef.current.click()} disabled={isLocked}
+                                    className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-2xl font-bold ${isLocked ? 'bg-slate-100 text-slate-400 border' : loadStatus === 'success' ? 'bg-indigo-500 text-white' : loadStatus === 'empty' ? 'bg-rose-500 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
                                     <IconFolder /> {isLocked ? 'Terkunci' : loadStatus === 'success' ? 'Berhasil!' : loadStatus === 'empty' ? 'Gagal' : 'Muat Excel'}
                                 </button>
-                                <button
-                                    onClick={deleteMonth}
-                                    disabled={isLocked}
-                                    className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-2xl font-bold transition-all ${isLocked ? 'bg-slate-100 text-slate-400 border border-slate-200' : 'bg-white border border-rose-200 text-rose-500 hover:bg-rose-50'}`}
-                                    title="Hapus bulan ini dari cloud"
-                                >
+                                <button onClick={deleteMonth} disabled={isLocked}
+                                    className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-2xl font-bold ${isLocked ? 'bg-slate-100 text-slate-400 border' : 'bg-white border border-rose-200 text-rose-500 hover:bg-rose-50'}`}>
                                     <IconTrash /> Hapus Bulan
                                 </button>
                             </div>
-                            <button
-                                onClick={exportExcel}
-                                className="w-full flex items-center justify-center gap-2 py-4 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all"
-                            >
+                            <button onClick={exportExcel}
+                                className="w-full flex items-center justify-center gap-2 py-4 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100">
                                 <IconDownload /> Ekspor Excel (.xlsx)
                             </button>
                         </div>
@@ -708,17 +1037,13 @@
 
                     {sortedMonthKeys.length > 0 && (
                         <div className="mt-6 bg-white rounded-3xl shadow-lg shadow-slate-200/60 border border-white overflow-hidden">
-                            <button
-                                onClick={() => setShowMonthList(!showMonthList)}
-                                className="w-full p-5 flex items-center justify-between hover:bg-slate-50 transition-colors"
-                            >
+                            <button onClick={() => setShowMonthList(!showMonthList)} className="w-full p-5 flex items-center justify-between hover:bg-slate-50">
                                 <div className="flex items-center gap-2">
                                     <IconCalendar />
                                     <h3 className="font-black text-slate-700 text-sm uppercase tracking-widest">Rekap Bulan Tersimpan</h3>
                                 </div>
                                 <span className="text-[10px] font-bold text-slate-400">{sortedMonthKeys.length} bulan</span>
                             </button>
-
                             {showMonthList && (
                                 <div className="px-5 pb-5 space-y-2">
                                     {sortedMonthKeys.map(key => {
@@ -728,11 +1053,8 @@
                                         const isPast = key < THIS_MONTH;
                                         const isItemLocked = isPast && !isUnlocked;
                                         return (
-                                            <button
-                                                key={key}
-                                                onClick={() => handleMonthChange(key)}
-                                                className={`w-full text-left p-3 rounded-xl transition-all flex items-center justify-between gap-3 ${isActive ? 'bg-indigo-50 border-2 border-indigo-200' : 'bg-slate-50 hover:bg-slate-100 border-2 border-transparent'}`}
-                                            >
+                                            <button key={key} onClick={() => handleMonthChange(key)}
+                                                className={`w-full text-left p-3 rounded-xl flex items-center justify-between gap-3 ${isActive ? 'bg-indigo-50 border-2 border-indigo-200' : 'bg-slate-50 hover:bg-slate-100 border-2 border-transparent'}`}>
                                                 <div className="flex-1 min-w-0">
                                                     <div className="flex items-center gap-2">
                                                         {isItemLocked && <IconLockClosed />}
@@ -750,7 +1072,6 @@
                                             </button>
                                         );
                                     })}
-
                                     {sortedYearKeys.length > 0 && (
                                         <div className="mt-4 pt-4 border-t border-slate-100">
                                             <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Ringkasan Tahunan</h4>
@@ -777,13 +1098,9 @@
                     <div className="mt-8 text-center space-y-2">
                         <div className="flex items-center justify-center gap-2">
                             <span className="text-[10px] font-bold text-slate-400 uppercase">Rate per Jam: Rp</span>
-                            <input
-                                type="number"
-                                disabled={isLocked}
-                                className={`bg-transparent border-none border-b w-24 text-xs font-bold p-0 focus:ring-0 text-center ${isLocked ? 'border-slate-100 text-slate-400 cursor-not-allowed' : 'border-slate-200 text-slate-600'}`}
-                                value={rate}
-                                onChange={e => !isLocked && setRate(Number(e.target.value))}
-                            />
+                            <input type="number" disabled={isLocked}
+                                className={`bg-transparent border-none border-b w-24 text-xs font-bold p-0 focus:ring-0 text-center ${isLocked ? 'border-slate-100 text-slate-400' : 'border-slate-200 text-slate-600'}`}
+                                value={rate} onChange={e => !isLocked && setRate(Number(e.target.value))} />
                             {isLocked && <IconLockClosed />}
                         </div>
                         <p className="text-[10px] text-slate-400 font-medium italic">
